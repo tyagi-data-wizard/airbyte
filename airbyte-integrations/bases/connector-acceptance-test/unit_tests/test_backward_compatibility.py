@@ -1335,3 +1335,27 @@ def test_catalog_backward_compatibility(previous_discovered_catalog, discovered_
     expectation = pytest.raises(NonBackwardCompatibleError) if should_fail else does_not_raise()
     with expectation:
         t.test_backward_compatibility(False, discovered_catalog, previous_discovered_catalog)
+
+
+def test_bad_catalog_backward_compatibility():
+    t = _TestDiscovery()
+
+    def discovered_catalog_fixture():
+        raise Exception
+
+    def skip_backward_compatibility_tests_fixture(
+            inputs={"config": "data"},
+            previous_connector_docker_runner=None,
+            discovered_catalog=discovered_catalog_fixture(),
+            previous_discovered_catalog={}
+    ):
+        if discovered_catalog == previous_discovered_catalog:
+            pytest.skip("The previous and actual discovered catalogs are identical.")
+
+        previous_connector_version = previous_connector_docker_runner._image.labels.get("io.airbyte.version")
+
+        if previous_connector_version == inputs.backward_compatibility_tests_config.disable_for_version:
+            pytest.skip(f"Backward compatibility tests are disabled for version {previous_connector_version}.")
+
+    t.test_backward_compatibility(skip_backward_compatibility_tests=skip_backward_compatibility_tests_fixture(),
+                                  discovered_catalog={}, previous_discovered_catalog={})
