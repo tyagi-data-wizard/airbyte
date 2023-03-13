@@ -26,10 +26,10 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   private static final String CREATE_STAGE_QUERY =
       "CREATE STAGE IF NOT EXISTS %s encryption = (type = 'SNOWFLAKE_SSE') copy_options = (on_error='skip_file');";
-  private static final String PUT_FILE_QUERY = "PUT file://%s @%s/%s PARALLEL = %d;";
+  private static final String PUT_FILE_QUERY = "PUT file://%s @%s/%s SOURCE_COMPRESSION = GZIP PARALLEL = %d;";
   private static final String LIST_STAGE_QUERY = "LIST @%s/%s/%s;";
   private static final String COPY_QUERY = "COPY INTO %s.%s FROM '@%s/%s' "
-      + "file_format = (type = csv compression = auto field_delimiter = ',' skip_header = 0 FIELD_OPTIONALLY_ENCLOSED_BY = '\"')";
+      + "file_format = (type = csv compression = gzip field_delimiter = ',' skip_header = 0 FIELD_OPTIONALLY_ENCLOSED_BY = '\"')";
   private static final String DROP_STAGE_QUERY = "DROP STAGE IF EXISTS %s;";
   private static final String REMOVE_QUERY = "REMOVE @%s;";
 
@@ -66,6 +66,7 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
                                      final String stageName,
                                      final String stagingPath)
       throws IOException {
+    LOGGER.info("Beginning upload of records to staging: {}", stagingPath);
     final List<Exception> exceptionsThrown = new ArrayList<>();
     boolean succeeded = false;
     while (exceptionsThrown.size() < UPLOAD_RETRY_LIMIT && !succeeded) {
@@ -93,9 +94,11 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
                                      final String stagingPath,
                                      final SerializableBuffer recordsData)
       throws Exception {
+    LOGGER.info("Beginning put query for path: {}/{}, filename: {}, size: {}", stagingPath, stageName, recordsData.getFilename(), recordsData.getByteCount());
     final String query = getPutQuery(stageName, stagingPath, recordsData.getFile().getAbsolutePath());
-    LOGGER.debug("Executing query: {}", query);
+    LOGGER.info("Executing query: {}", query);
     database.execute(query);
+    LOGGER.info("Completed put query for path: {}/{}, filename: {}, size: {}", stagingPath, stageName, recordsData.getFilename(), recordsData.getByteCount());
     if (!checkStageObjectExists(database, stageName, stagingPath, recordsData.getFilename())) {
       LOGGER.error(String.format("Failed to upload data into stage, object @%s not found",
           (stagingPath + "/" + recordsData.getFilename()).replaceAll("/+", "/")));
@@ -104,7 +107,9 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
   }
 
   protected String getPutQuery(final String stageName, final String stagingPath, final String filePath) {
-    return String.format(PUT_FILE_QUERY, filePath, stageName, stagingPath, Runtime.getRuntime().availableProcessors());
+    int availableProcessors = Runtime.getRuntime().availableProcessors();
+    LOGGER.info("Available parallelism for PUT query: {}", availableProcessors);
+    return String.format(PUT_FILE_QUERY, filePath, stageName, stagingPath, availableProcessors);
   }
 
   private boolean checkStageObjectExists(final JdbcDatabase database, final String stageName, final String stagingPath, final String filename)
@@ -161,9 +166,11 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
                                      final String schemaName)
       throws SQLException {
     try {
+      LOGGER.info("Beginning copy of {}/{} into {}", stagingPath, stageName, tableName);
       final String query = getCopyQuery(stageName, stagingPath, stagedFiles, tableName, schemaName);
       LOGGER.debug("Executing query: {}", query);
       database.execute(query);
+      LOGGER.info("Done copying {}/{} info {}", stagingPath, stageName, tableName);
     } catch (SQLException e) {
       throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
     }

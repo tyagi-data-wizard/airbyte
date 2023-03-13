@@ -188,6 +188,7 @@ public class StagingConsumerFactory {
                                                                                                        final StagingOperations stagingOperations,
                                                                                                        final List<WriteConfig> writeConfigs,
                                                                                                        final ConfiguredAirbyteCatalog catalog) {
+    LOGGER.info("Beginning buffer flush function");
     final Set<WriteConfig> conflictingStreams = new HashSet<>();
     final Map<AirbyteStreamNameNamespacePair, WriteConfig> pairToWriteConfig = new HashMap<>();
     for (final WriteConfig config : writeConfigs) {
@@ -220,7 +221,9 @@ public class StagingConsumerFactory {
       final String stagingPath =
           stagingOperations.getStagingPath(RANDOM_CONNECTION_ID, schemaName, writeConfig.getStreamName(), writeConfig.getWriteDatetime());
       try (writer) {
+        LOGGER.info("Flushing buffer: {}", writer.getFilename());
         writer.flush();
+        LOGGER.info("Done flushing buffer: {}", writer.getFilename());
         final String stagedFile = stagingOperations.uploadRecordsToStage(database, writer, schemaName, stageName, stagingPath);
         copyIntoTableFromStage(database, stageName, stagingPath, List.of(stagedFile), writeConfig.getOutputTableName(), schemaName,
             stagingOperations);
