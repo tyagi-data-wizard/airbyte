@@ -166,11 +166,11 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
                                      final String schemaName)
       throws SQLException {
     try {
-      LOGGER.info("Beginning copy of {}/{} into {}", stagingPath, stageName, tableName);
+      LOGGER.info("Beginning copy of {} ({} files) into {}", stagingPath, stagedFiles.size(), tableName);
       final String query = getCopyQuery(stageName, stagingPath, stagedFiles, tableName, schemaName);
-      LOGGER.debug("Executing query: {}", query);
+      LOGGER.info("Executing query: {}", query);
       database.execute(query);
-      LOGGER.info("Done copying {}/{} info {}", stagingPath, stageName, tableName);
+      LOGGER.info("Done copying {} ({} files) info {}", stagingPath, stagedFiles.size(), tableName);
     } catch (SQLException e) {
       throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
     }
