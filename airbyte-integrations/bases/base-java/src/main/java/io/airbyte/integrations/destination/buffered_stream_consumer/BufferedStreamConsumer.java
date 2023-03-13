@@ -28,6 +28,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -147,6 +148,8 @@ public class BufferedStreamConsumer extends FailureTrackingAirbyteMessageConsume
     onStart.call();
   }
 
+  private final AtomicLong messageCounter = new AtomicLong();
+
   /**
    * AcceptTracked will still process AirbyteMessages as usual with the addition of periodically
    * flushing buffer and writing data to destination storage
@@ -158,6 +161,9 @@ public class BufferedStreamConsumer extends FailureTrackingAirbyteMessageConsume
   protected void acceptTracked(final AirbyteMessage message) throws Exception {
     Preconditions.checkState(hasStarted, "Cannot accept records until consumer has started");
     if (message.getType() == Type.RECORD) {
+      if (messageCounter.incrementAndGet() % 10000 == 0) {
+        LOGGER.info("received messages: {}", messageCounter.get());
+      }
       final AirbyteRecordMessage recordMessage = message.getRecord();
       final AirbyteStreamNameNamespacePair stream = AirbyteStreamNameNamespacePair.fromRecordMessage(recordMessage);
 
