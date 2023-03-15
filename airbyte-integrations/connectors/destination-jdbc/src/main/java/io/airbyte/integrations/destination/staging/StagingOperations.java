@@ -82,4 +82,5 @@ public interface StagingOperations extends SqlOperations {
    */
   void dropStageIfExists(JdbcDatabase database, String stageName) throws Exception;
 
+  default void awaitCompletion() {}
 }

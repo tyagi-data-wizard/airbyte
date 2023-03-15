@@ -10,11 +10,21 @@ import io.airbyte.db.jdbc.JdbcDatabase;
 import io.airbyte.integrations.destination.NamingConventionTransformer;
 import io.airbyte.integrations.destination.record_buffer.SerializableBuffer;
 import io.airbyte.integrations.destination.staging.StagingOperations;
+import io.airbyte.integrations.util.Resources;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.RejectedExecutionHandler;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Stream;
 import org.joda.time.DateTime;
 import org.slf4j.Logger;
@@ -37,8 +47,48 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   private final NamingConventionTransformer nameTransformer;
 
+  private final ThreadPoolExecutor executor;
+  private List<Future<?>> futures = new ArrayList<>();
+
   public SnowflakeInternalStagingSqlOperations(final NamingConventionTransformer nameTransformer) {
     this.nameTransformer = nameTransformer;
+
+    final BlockingQueue<Runnable> workQueue = new LinkedBlockingQueue<>(10);
+    executor = new ThreadPoolExecutor(1, 5, 0, TimeUnit.MILLISECONDS, workQueue, new BlockCallerPolicy());
+    Resources.getInstance().addCloseable(() -> {
+      LOGGER.error("---> begin executor shutdown");
+      executor.shutdown();
+      LOGGER.error("---> end executor shutdown");
+      try {
+        LOGGER.error("---> begin await termination");
+        if (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
+          LOGGER.error("---> failed to await termination");
+          executor.shutdownNow();
+        }
+        LOGGER.error("---> end await termination");
+      } catch (InterruptedException ex) {
+        executor.shutdownNow();
+        Thread.currentThread().interrupt();
+      }
+    });
+  }
+
+  static class BlockCallerPolicy implements RejectedExecutionHandler {
+
+    @Override
+    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
+      // Without this check the call hangs forever on the queue put.
+      if (executor.isShutdown()) {
+        throw new RejectedExecutionException("Executor is shutdown");
+      }
+      try {
+        // block until there's room
+        executor.getQueue().put(r);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new RejectedExecutionException("Unexpected InterruptedException", e);
+      }
+    }
   }
 
   @Override
@@ -61,10 +111,10 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   @Override
   public String uploadRecordsToStage(final JdbcDatabase database,
-                                     final SerializableBuffer recordsData,
-                                     final String namespace,
-                                     final String stageName,
-                                     final String stagingPath)
+      final SerializableBuffer recordsData,
+      final String namespace,
+      final String stageName,
+      final String stagingPath)
       throws IOException {
     LOGGER.info("Beginning upload of records to staging: {}", stagingPath);
     final List<Exception> exceptionsThrown = new ArrayList<>();
@@ -90,15 +140,17 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
   }
 
   private void uploadRecordsToBucket(final JdbcDatabase database,
-                                     final String stageName,
-                                     final String stagingPath,
-                                     final SerializableBuffer recordsData)
+      final String stageName,
+      final String stagingPath,
+      final SerializableBuffer recordsData)
       throws Exception {
-    LOGGER.info("Beginning put query for path: {}/{}, filename: {}, size: {}", stagingPath, stageName, recordsData.getFilename(), recordsData.getByteCount());
+    LOGGER.info("Beginning put query for path: {}/{}, filename: {}, size: {}", stagingPath, stageName, recordsData.getFilename(),
+        recordsData.getByteCount());
     final String query = getPutQuery(stageName, stagingPath, recordsData.getFile().getAbsolutePath());
     LOGGER.info("Executing query: {}", query);
     database.execute(query);
-    LOGGER.info("Completed put query for path: {}/{}, filename: {}, size: {}", stagingPath, stageName, recordsData.getFilename(), recordsData.getByteCount());
+    LOGGER.info("Completed put query for path: {}/{}, filename: {}, size: {}", stagingPath, stageName, recordsData.getFilename(),
+        recordsData.getByteCount());
     if (!checkStageObjectExists(database, stageName, stagingPath, recordsData.getFilename())) {
       LOGGER.error(String.format("Failed to upload data into stage, object @%s not found",
           (stagingPath + "/" + recordsData.getFilename()).replaceAll("/+", "/")));
@@ -126,9 +178,9 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
   /**
    * Creates a SQL query to list all files that have been staged
    *
-   * @param stageName name of staging folder
+   * @param stageName   name of staging folder
    * @param stagingPath path to the files within the staging folder
-   * @param filename name of the file within staging area
+   * @param filename    name of the file within staging area
    * @return SQL query string
    */
   protected String getListQuery(final String stageName, final String stagingPath, final String filename) {
@@ -147,8 +199,7 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
   }
 
   /**
-   * Creates a SQL query to create a staging folder. This query will create a staging folder if one
-   * previously did not exist
+   * Creates a SQL query to create a staging folder. This query will create a staging folder if one previously did not exist
    *
    * @param stageName name of the staging folder
    * @return SQL query string
@@ -159,39 +210,45 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   @Override
   public void copyIntoTableFromStage(final JdbcDatabase database,
-                                     final String stageName,
-                                     final String stagingPath,
-                                     final List<String> stagedFiles,
-                                     final String tableName,
-                                     final String schemaName)
+      final String stageName,
+      final String stagingPath,
+      final List<String> stagedFiles,
+      final String tableName,
+      final String schemaName)
       throws SQLException {
-    try {
-      LOGGER.info("Beginning copy of {} ({} files) into {}", stagingPath, stagedFiles.size(), tableName);
-      final String query = getCopyQuery(stageName, stagingPath, stagedFiles, tableName, schemaName);
-      LOGGER.info("Executing query: {}", query);
-      database.execute(query);
-      LOGGER.info("Done copying {} ({} files) info {}", stagingPath, stagedFiles.size(), tableName);
-    } catch (SQLException e) {
-      throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
-    }
+    LOGGER.info("---> Executing COPY in separate thread");
+    Future<?> future = executor.submit(() -> {
+      try {
+        LOGGER.info("Beginning copy of {} ({} files) into {}", stagingPath, stagedFiles.size(), tableName);
+        final String query = getCopyQuery(stageName, stagingPath, stagedFiles, tableName, schemaName);
+        LOGGER.info("Executing query: {}", query);
+        database.execute(query);
+        LOGGER.info("Done copying {} ({} files) info {}", stagingPath, stagedFiles.size(), tableName);
+      } catch (SQLException e) {
+        LOGGER.error(e.getMessage());
+//        throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
+      }
+
+    });
+    futures.add(future);
   }
 
   /**
    * Creates a SQL query to bulk copy data into fully qualified destination table See
-   * https://docs.snowflake.com/en/sql-reference/sql/copy-into-table.html for more context
+   * <a href="https://docs.snowflake.com/en/sql-reference/sql/copy-into-table.html">...</a> for more context
    *
-   * @param stageName name of staging folder
-   * @param stagingPath path of staging folder to data files
-   * @param stagedFiles collection of the staging files
+   * @param stageName    name of staging folder
+   * @param stagingPath  path of staging folder to data files
+   * @param stagedFiles  collection of the staging files
    * @param dstTableName name of destination table
-   * @param schemaName name of schema
+   * @param schemaName   name of schema
    * @return SQL query string
    */
   protected String getCopyQuery(final String stageName,
-                                final String stagingPath,
-                                final List<String> stagedFiles,
-                                final String dstTableName,
-                                final String schemaName) {
+      final String stagingPath,
+      final List<String> stagedFiles,
+      final String dstTableName,
+      final String schemaName) {
     return String.format(COPY_QUERY + generateFilesList(stagedFiles) + ";", schemaName, dstTableName, stageName, stagingPath);
   }
 
@@ -204,6 +261,21 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
     } catch (SQLException e) {
       throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
     }
+  }
+
+  @Override
+  public void awaitCompletion() {
+    LOGGER.info("---> awaiting completion of futures");
+    for (Future<?> future : futures) {
+      try {
+        future.get(120, TimeUnit.SECONDS);
+        LOGGER.info("---> future completed");
+      } catch (InterruptedException | ExecutionException | TimeoutException e) {
+        LOGGER.info("---> task get failed: " + e.getMessage());
+        future.cancel(true);
+      }
+    }
+    LOGGER.info("---> all futures completed");
   }
 
   /**
@@ -228,8 +300,8 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
   }
 
   /**
-   * Creates a SQL query used to remove staging files that were just staged See
-   * https://docs.snowflake.com/en/sql-reference/sql/remove.html for more context
+   * Creates a SQL query used to remove staging files that were just staged See https://docs.snowflake.com/en/sql-reference/sql/remove.html for more
+   * context
    *
    * @param stageName name of staging folder
    * @return SQL query string

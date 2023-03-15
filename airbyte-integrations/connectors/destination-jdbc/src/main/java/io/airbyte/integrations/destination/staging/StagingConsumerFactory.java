@@ -23,6 +23,7 @@ import io.airbyte.integrations.destination.buffered_stream_consumer.OnStartFunct
 import io.airbyte.integrations.destination.jdbc.WriteConfig;
 import io.airbyte.integrations.destination.record_buffer.SerializableBuffer;
 import io.airbyte.integrations.destination.record_buffer.SerializedBufferingStrategy;
+import io.airbyte.integrations.util.Resources;
 import io.airbyte.protocol.models.v0.AirbyteMessage;
 import io.airbyte.protocol.models.v0.AirbyteStream;
 import io.airbyte.protocol.models.v0.AirbyteStreamNameNamespacePair;
@@ -270,6 +271,7 @@ public class StagingConsumerFactory {
                                           final List<WriteConfig> writeConfigs,
                                           final boolean purgeStagingData) {
     return (hasFailed) -> {
+      stagingOperations.awaitCompletion();
       if (!hasFailed) {
         stagingOperations.onDestinationCloseOperations(database, writeConfigs);
         LOGGER.info("Finalizing tables in destination completed.");
@@ -286,6 +288,7 @@ public class StagingConsumerFactory {
           stagingOperations.dropStageIfExists(database, stageName);
         }
       }
+      Resources.getInstance().closeAll();
       LOGGER.info("Cleaning up destination completed.");
     };
   }
