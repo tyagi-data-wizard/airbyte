@@ -88,7 +88,7 @@ public class SqlOperationsUtils {
       // TODO(sherif) this should use a smarter, destination-aware partitioning scheme instead of 10k by
       // default
       for (List<AirbyteRecordMessage> partition : Iterables.partition(records, 10_000)) {
-        LOGGER.info("Processing partition");
+        LOGGER.info("Begin processing partition");
         final StringBuilder sql = new StringBuilder(insertQueryComponent);
         partition.forEach(r -> sql.append(recordQueryComponent));
         final String s = sql.toString();

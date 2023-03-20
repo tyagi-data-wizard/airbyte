@@ -10,18 +10,13 @@ import io.airbyte.db.jdbc.JdbcDatabase;
 import io.airbyte.integrations.destination.NamingConventionTransformer;
 import io.airbyte.integrations.destination.record_buffer.SerializableBuffer;
 import io.airbyte.integrations.destination.staging.StagingOperations;
-import io.airbyte.integrations.util.Resources;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -36,10 +31,10 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   private static final String CREATE_STAGE_QUERY =
       "CREATE STAGE IF NOT EXISTS %s encryption = (type = 'SNOWFLAKE_SSE') copy_options = (on_error='skip_file');";
-  private static final String PUT_FILE_QUERY = "PUT file://%s @%s/%s SOURCE_COMPRESSION = GZIP PARALLEL = %d;";
+  private static final String PUT_FILE_QUERY = "PUT file://%s @%s/%s PARALLEL = %d;";
   private static final String LIST_STAGE_QUERY = "LIST @%s/%s/%s;";
   private static final String COPY_QUERY = "COPY INTO %s.%s FROM '@%s/%s' "
-      + "file_format = (type = csv compression = gzip field_delimiter = ',' skip_header = 0 FIELD_OPTIONALLY_ENCLOSED_BY = '\"')";
+      + "file_format = (type = csv compression = auto field_delimiter = ',' skip_header = 0 FIELD_OPTIONALLY_ENCLOSED_BY = '\"')";
   private static final String DROP_STAGE_QUERY = "DROP STAGE IF EXISTS %s;";
   private static final String REMOVE_QUERY = "REMOVE @%s;";
 
@@ -52,43 +47,7 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   public SnowflakeInternalStagingSqlOperations(final NamingConventionTransformer nameTransformer) {
     this.nameTransformer = nameTransformer;
-
-    final BlockingQueue<Runnable> workQueue = new LinkedBlockingQueue<>(10);
-    executor = new ThreadPoolExecutor(1, 5, 0, TimeUnit.MILLISECONDS, workQueue, new BlockCallerPolicy());
-    Resources.getInstance().addCloseable(() -> {
-      LOGGER.error("---> begin executor shutdown");
-      executor.shutdown();
-      LOGGER.error("---> end executor shutdown");
-      try {
-        LOGGER.error("---> begin await termination");
-        if (!executor.awaitTermination(60, TimeUnit.SECONDS)) {
-          LOGGER.error("---> failed to await termination");
-          executor.shutdownNow();
-        }
-        LOGGER.error("---> end await termination");
-      } catch (InterruptedException ex) {
-        executor.shutdownNow();
-        Thread.currentThread().interrupt();
-      }
-    });
-  }
-
-  static class BlockCallerPolicy implements RejectedExecutionHandler {
-
-    @Override
-    public void rejectedExecution(Runnable r, ThreadPoolExecutor executor) {
-      // Without this check the call hangs forever on the queue put.
-      if (executor.isShutdown()) {
-        throw new RejectedExecutionException("Executor is shutdown");
-      }
-      try {
-        // block until there's room
-        executor.getQueue().put(r);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new RejectedExecutionException("Unexpected InterruptedException", e);
-      }
-    }
+    this.executor = ExecutorFactory.getExecutor(5, 100);
   }
 
   @Override
@@ -214,22 +173,22 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
       final String stagingPath,
       final List<String> stagedFiles,
       final String tableName,
-      final String schemaName)
-      throws SQLException {
-    LOGGER.info("---> Executing COPY in separate thread");
-    Future<?> future = executor.submit(() -> {
+      final String schemaName) {
+
+    LOGGER.info("Submitting COPY operation");
+    Future<Void> future = executor.submit(() -> {
       try {
         LOGGER.info("Beginning copy of {} ({} files) into {}", stagingPath, stagedFiles.size(), tableName);
         final String query = getCopyQuery(stageName, stagingPath, stagedFiles, tableName, schemaName);
-        LOGGER.info("Executing query: {}", query);
         database.execute(query);
         LOGGER.info("Done copying {} ({} files) info {}", stagingPath, stagedFiles.size(), tableName);
       } catch (SQLException e) {
         LOGGER.error(e.getMessage());
-//        throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
+        throw checkForKnownConfigExceptions(e).orElseThrow(() -> e);
       }
-
+      return null;
     });
+
     futures.add(future);
   }
 
@@ -265,17 +224,15 @@ public class SnowflakeInternalStagingSqlOperations extends SnowflakeSqlOperation
 
   @Override
   public void awaitCompletion() {
-    LOGGER.info("---> awaiting completion of futures");
+    LOGGER.info("Awaiting completion of async processing");
     for (Future<?> future : futures) {
       try {
         future.get(120, TimeUnit.SECONDS);
-        LOGGER.info("---> future completed");
       } catch (InterruptedException | ExecutionException | TimeoutException e) {
-        LOGGER.info("---> task get failed: " + e.getMessage());
+        LOGGER.error("async job failed: " + e.getMessage());
         future.cancel(true);
       }
     }
-    LOGGER.info("---> all futures completed");
   }
 
   /**

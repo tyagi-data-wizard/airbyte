@@ -82,5 +82,9 @@ public interface StagingOperations extends SqlOperations {
    */
   void dropStageIfExists(JdbcDatabase database, String stageName) throws Exception;
 
+  /**
+   * For staging operations that operate async, this method provides a place to await completion
+   * of operations prior to shutdown, such as long running staging and COPY operations.
+   */
   default void awaitCompletion() {}
 }

@@ -23,7 +23,7 @@ import io.airbyte.integrations.destination.buffered_stream_consumer.OnStartFunct
 import io.airbyte.integrations.destination.jdbc.WriteConfig;
 import io.airbyte.integrations.destination.record_buffer.SerializableBuffer;
 import io.airbyte.integrations.destination.record_buffer.SerializedBufferingStrategy;
-import io.airbyte.integrations.util.Resources;
+import io.airbyte.integrations.util.CloseableResourceManager;
 import io.airbyte.protocol.models.v0.AirbyteMessage;
 import io.airbyte.protocol.models.v0.AirbyteStream;
 import io.airbyte.protocol.models.v0.AirbyteStreamNameNamespacePair;
@@ -46,8 +46,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Uses both Factory and Consumer design pattern to create a single point of creation for consuming
- * {@link AirbyteMessage} for processing
+ * Uses both Factory and Consumer design pattern to create a single point of creation for consuming {@link AirbyteMessage} for processing
  */
 public class StagingConsumerFactory {
 
@@ -65,13 +64,13 @@ public class StagingConsumerFactory {
   private final UUID RANDOM_CONNECTION_ID = UUID.randomUUID();
 
   public AirbyteMessageConsumer create(final Consumer<AirbyteMessage> outputRecordCollector,
-                                       final JdbcDatabase database,
-                                       final StagingOperations stagingOperations,
-                                       final NamingConventionTransformer namingResolver,
-                                       final CheckedBiFunction<AirbyteStreamNameNamespacePair, ConfiguredAirbyteCatalog, SerializableBuffer, Exception> onCreateBuffer,
-                                       final JsonNode config,
-                                       final ConfiguredAirbyteCatalog catalog,
-                                       final boolean purgeStagingData) {
+      final JdbcDatabase database,
+      final StagingOperations stagingOperations,
+      final NamingConventionTransformer namingResolver,
+      final CheckedBiFunction<AirbyteStreamNameNamespacePair, ConfiguredAirbyteCatalog, SerializableBuffer, Exception> onCreateBuffer,
+      final JsonNode config,
+      final ConfiguredAirbyteCatalog catalog,
+      final boolean purgeStagingData) {
     final List<WriteConfig> writeConfigs = createWriteConfigs(namingResolver, config, catalog);
     return new BufferedStreamConsumer(
         outputRecordCollector,
@@ -86,26 +85,23 @@ public class StagingConsumerFactory {
   }
 
   /**
-   * Creates a list of all {@link WriteConfig} for each stream within a
-   * {@link ConfiguredAirbyteCatalog}. Each write config represents the configuration settings for
-   * writing to a destination connector
+   * Creates a list of all {@link WriteConfig} for each stream within a {@link ConfiguredAirbyteCatalog}. Each write config represents the
+   * configuration settings for writing to a destination connector
    *
-   * @param namingResolver {@link NamingConventionTransformer} used to transform names that are
-   *        acceptable by each destination connector
-   * @param config destination connector configuration parameters
-   * @param catalog {@link ConfiguredAirbyteCatalog} collection of configured
-   *        {@link ConfiguredAirbyteStream}
+   * @param namingResolver {@link NamingConventionTransformer} used to transform names that are acceptable by each destination connector
+   * @param config         destination connector configuration parameters
+   * @param catalog        {@link ConfiguredAirbyteCatalog} collection of configured {@link ConfiguredAirbyteStream}
    * @return list of all write configs for each stream in a {@link ConfiguredAirbyteCatalog}
    */
   private static List<WriteConfig> createWriteConfigs(final NamingConventionTransformer namingResolver,
-                                                      final JsonNode config,
-                                                      final ConfiguredAirbyteCatalog catalog) {
+      final JsonNode config,
+      final ConfiguredAirbyteCatalog catalog) {
 
     return catalog.getStreams().stream().map(toWriteConfig(namingResolver, config)).collect(toList());
   }
 
   private static Function<ConfiguredAirbyteStream, WriteConfig> toWriteConfig(final NamingConventionTransformer namingResolver,
-                                                                              final JsonNode config) {
+      final JsonNode config) {
     return stream -> {
       Preconditions.checkNotNull(stream.getDestinationSyncMode(), "Undefined destination sync mode");
       final AirbyteStream abStream = stream.getStream();
@@ -126,16 +122,16 @@ public class StagingConsumerFactory {
   }
 
   private static String getOutputSchema(final AirbyteStream stream,
-                                        final String defaultDestSchema,
-                                        final NamingConventionTransformer namingResolver) {
+      final String defaultDestSchema,
+      final NamingConventionTransformer namingResolver) {
     return stream.getNamespace() != null
         ? namingResolver.getNamespace(stream.getNamespace())
         : namingResolver.getNamespace(defaultDestSchema);
   }
 
   private OnStartFunction onStartFunction(final JdbcDatabase database,
-                                          final StagingOperations stagingOperations,
-                                          final List<WriteConfig> writeConfigs) {
+      final StagingOperations stagingOperations,
+      final List<WriteConfig> writeConfigs) {
     return () -> {
       LOGGER.info("Preparing raw tables in destination started for {} streams", writeConfigs.size());
       final List<String> queryList = new ArrayList<>();
@@ -177,19 +173,19 @@ public class StagingConsumerFactory {
   /**
    * Logic handling how destinations with staging areas (aka bucket storages) will flush their buffer
    *
-   * @param database database used for syncing
+   * @param database          database used for syncing
    * @param stagingOperations collection of SQL queries necessary for writing data into a staging area
-   * @param writeConfigs configuration settings for all destination connectors needed to write
-   * @param catalog collection of configured streams (e.g. API endpoints or database tables)
-   * @return
+   * @param writeConfigs      configuration settings for all destination connectors needed to write
+   * @param catalog           collection of configured streams (e.g. API endpoints or database tables)
+   * @return CheckedBiConsumer function for flushing
    */
   @VisibleForTesting
   CheckedBiConsumer<AirbyteStreamNameNamespacePair, SerializableBuffer, Exception> flushBufferFunction(
-                                                                                                       final JdbcDatabase database,
-                                                                                                       final StagingOperations stagingOperations,
-                                                                                                       final List<WriteConfig> writeConfigs,
-                                                                                                       final ConfiguredAirbyteCatalog catalog) {
-    LOGGER.info("Beginning buffer flush function");
+      final JdbcDatabase database,
+      final StagingOperations stagingOperations,
+      final List<WriteConfig> writeConfigs,
+      final ConfiguredAirbyteCatalog catalog) {
+
     final Set<WriteConfig> conflictingStreams = new HashSet<>();
     final Map<AirbyteStreamNameNamespacePair, WriteConfig> pairToWriteConfig = new HashMap<>();
     for (final WriteConfig config : writeConfigs) {
@@ -236,16 +232,15 @@ public class StagingConsumerFactory {
   }
 
   /**
-   * Handles copying data from staging area to destination table and clean up of staged files if
-   * upload was unsuccessful
+   * Handles copying data from staging area to destination table and clean up of staged files if upload was unsuccessful
    */
   private void copyIntoTableFromStage(final JdbcDatabase database,
-                                      final String stageName,
-                                      final String stagingPath,
-                                      final List<String> stagedFiles,
-                                      final String tableName,
-                                      final String schemaName,
-                                      final StagingOperations stagingOperations)
+      final String stageName,
+      final String stagingPath,
+      final List<String> stagedFiles,
+      final String tableName,
+      final String schemaName,
+      final StagingOperations stagingOperations)
       throws Exception {
     try {
       stagingOperations.copyIntoTableFromStage(database, stageName, stagingPath, stagedFiles,
@@ -260,16 +255,16 @@ public class StagingConsumerFactory {
   /**
    * Tear down process, will attempt to try to clean out any staging area
    *
-   * @param database database used for syncing
+   * @param database          database used for syncing
    * @param stagingOperations collection of SQL queries necessary for writing data into a staging area
-   * @param writeConfigs configuration settings for all destination connectors needed to write
-   * @param purgeStagingData drop staging area if true, keep otherwise
-   * @return
+   * @param writeConfigs      configuration settings for all destination connectors needed to write
+   * @param purgeStagingData  drop staging area if true, keep otherwise
+   * @return OnCloseFunction close function
    */
   private OnCloseFunction onCloseFunction(final JdbcDatabase database,
-                                          final StagingOperations stagingOperations,
-                                          final List<WriteConfig> writeConfigs,
-                                          final boolean purgeStagingData) {
+      final StagingOperations stagingOperations,
+      final List<WriteConfig> writeConfigs,
+      final boolean purgeStagingData) {
     return (hasFailed) -> {
       stagingOperations.awaitCompletion();
       if (!hasFailed) {
@@ -280,15 +275,15 @@ public class StagingConsumerFactory {
       // area (if user configured)
       LOGGER.info("Cleaning up destination started for {} streams", writeConfigs.size());
       for (final WriteConfig writeConfig : writeConfigs) {
-        final String schemaName = writeConfig.getOutputSchemaName();
         if (purgeStagingData) {
+          final String schemaName = writeConfig.getOutputSchemaName();
           final String stageName = stagingOperations.getStageName(schemaName, writeConfig.getStreamName());
           LOGGER.info("Cleaning stage in destination started for stream {}. schema {}, stage: {}", writeConfig.getStreamName(), schemaName,
               stageName);
           stagingOperations.dropStageIfExists(database, stageName);
         }
       }
-      Resources.getInstance().closeAll();
+      CloseableResourceManager.getInstance().closeAll();
       LOGGER.info("Cleaning up destination completed.");
     };
   }

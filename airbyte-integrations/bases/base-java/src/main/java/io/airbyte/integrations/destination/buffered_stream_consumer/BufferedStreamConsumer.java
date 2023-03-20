@@ -96,6 +96,8 @@ public class BufferedStreamConsumer extends FailureTrackingAirbyteMessageConsume
   private Instant nextFlushDeadline;
   private final Duration bufferFlushFrequency;
 
+  private final AtomicLong messageCounter = new AtomicLong();
+
   public BufferedStreamConsumer(final Consumer<AirbyteMessage> outputRecordCollector,
                                 final VoidCallable onStart,
                                 final BufferingStrategy bufferingStrategy,
@@ -147,8 +149,6 @@ public class BufferedStreamConsumer extends FailureTrackingAirbyteMessageConsume
     LOGGER.info("{} started.", BufferedStreamConsumer.class);
     onStart.call();
   }
-
-  private final AtomicLong messageCounter = new AtomicLong();
 
   /**
    * AcceptTracked will still process AirbyteMessages as usual with the addition of periodically
@@ -254,6 +254,7 @@ public class BufferedStreamConsumer extends FailureTrackingAirbyteMessageConsume
     Preconditions.checkState(!hasClosed, "Has already closed.");
     hasClosed = true;
 
+    LOGGER.info("Processed {} incoming messages", messageCounter.get());
     streamToIgnoredRecordCount
         .forEach((pair, count) -> LOGGER.warn("A total of {} record(s) of data from stream {} were invalid and were ignored.", count, pair));
     if (hasFailed) {
